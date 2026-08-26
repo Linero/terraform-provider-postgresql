@@ -1,0 +1,6 @@
+/bin
+/vendor
+.terraform
+.terraform*
+terraform.tfstate
+terraform.tfstate.*
