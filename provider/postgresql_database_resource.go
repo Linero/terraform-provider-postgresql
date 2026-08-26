@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -139,8 +140,8 @@ func (r *PostgresqlDatabaseResource) Create(ctx context.Context, req resource.Cr
 		plan.ConnectionLimit.ValueInt64(),
 	)
 
+	adopted := false
 	err := r.client.WithCatalogLockNoTx(ctx, func(ctx context.Context, conn *pgxpool.Conn) error {
-		adopted := false
 		if _, err := conn.Exec(ctx, createSQL); err != nil {
 			if !isPgErrorCode(err, pgErrDuplicateDatabase) {
 				return fmt.Errorf("could not create database: %w", err)
@@ -176,6 +177,31 @@ func (r *PostgresqlDatabaseResource) Create(ctx context.Context, req resource.Cr
 		resp.Diagnostics.AddError("Error Creating PostgreSQL Database", fmt.Sprintf("Database %s was reported as created but is missing on read-back", name))
 		return
 	}
+
+	if adopted {
+		var mismatches []string
+		if plan.Encoding.ValueString() != attrs.encoding {
+			mismatches = append(mismatches, fmt.Sprintf("encoding (configured %q, actual %q)", plan.Encoding.ValueString(), attrs.encoding))
+		}
+		if plan.LcCollate.ValueString() != attrs.lcCollate {
+			mismatches = append(mismatches, fmt.Sprintf("lc_collate (configured %q, actual %q)", plan.LcCollate.ValueString(), attrs.lcCollate))
+		}
+		if plan.LcCtype.ValueString() != attrs.lcCtype {
+			mismatches = append(mismatches, fmt.Sprintf("lc_ctype (configured %q, actual %q)", plan.LcCtype.ValueString(), attrs.lcCtype))
+		}
+		if len(mismatches) > 0 {
+			resp.Diagnostics.AddError(
+				"Error Creating PostgreSQL Database",
+				fmt.Sprintf(
+					"Database %s already exists and was adopted, but its creation-time attributes differ from the configuration and cannot be changed without dropping and recreating the database: %s. "+
+						"Update the configuration to match the existing database, or drop the database and let Terraform recreate it.",
+					name, strings.Join(mismatches, ", "),
+				),
+			)
+			return
+		}
+	}
+
 	attrs.applyTo(&plan)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)

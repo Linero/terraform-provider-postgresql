@@ -193,6 +193,10 @@ func (r *PostgresqlDefaultPrivilegesResource) Read(ctx context.Context, req reso
 		WHERE owner_role.rolname = $1 AND n.nspname = $2 AND d.defaclobjtype = $3 AND grantee_role.rolname = $4`,
 		state.Owner.ValueString(), state.Schema.ValueString(), objType, state.Role.ValueString())
 	if err != nil {
+		if isDatabaseMissing(err) {
+			resp.State.RemoveResource(ctx)
+			return
+		}
 		resp.Diagnostics.AddError("Error Reading PostgreSQL Default Privileges", err.Error())
 		return
 	}
@@ -291,6 +295,10 @@ func (r *PostgresqlDefaultPrivilegesResource) Delete(ctx context.Context, req re
 		return err
 	})
 	if err != nil {
+		if isDatabaseMissing(err) {
+			tflog.Trace(ctx, "postgresql default privileges' database no longer exists, nothing to revoke", map[string]interface{}{"database": state.Database.ValueString()})
+			return
+		}
 		resp.Diagnostics.AddError("Error Deleting PostgreSQL Default Privileges", err.Error())
 		return
 	}

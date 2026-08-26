@@ -209,7 +209,7 @@ func (r *PostgresqlGrantResource) Read(ctx context.Context, req resource.ReadReq
 func (r *PostgresqlGrantResource) roleExists(ctx context.Context, database, role string) (bool, error) {
 	err := r.client.QueryRowOnDatabase(ctx, database, `SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $1`, role).Scan(new(int))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) || isDatabaseMissing(err) {
 			return false, nil
 		}
 		return false, err
@@ -282,6 +282,10 @@ func (r *PostgresqlGrantResource) Delete(ctx context.Context, req resource.Delet
 		return err
 	})
 	if err != nil {
+		if isDatabaseMissing(err) {
+			tflog.Trace(ctx, "postgresql grant's database no longer exists, nothing to revoke", map[string]interface{}{"database": state.Database.ValueString()})
+			return
+		}
 		resp.Diagnostics.AddError("Error Deleting PostgreSQL Grant", err.Error())
 		return
 	}
