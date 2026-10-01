@@ -124,5 +124,7 @@ func (p *PostgresqlProvider) Resources(ctx context.Context) []func() resource.Re
 		NewPostgresqlDatabaseOwnerResource,
 		NewPostgresqlGrantResource,
 		NewPostgresqlDefaultPrivilegesResource,
+		NewPostgresqlGrantRoleResource,
+		NewPostgresqlSessionRoleResource,
 	}
 }

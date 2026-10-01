@@ -12,6 +12,7 @@ const (
 	pgErrDuplicateObject    = "42710" // CREATE ROLE on a role name that already exists
 	pgErrDuplicateDatabase  = "42P04" // CREATE DATABASE on a name that already exists
 	pgErrInvalidCatalogName = "3D000" // connecting to (or otherwise referencing) a database that does not exist
+	pgErrUndefinedObject    = "42704" // referencing a role that does not exist
 )
 
 // isPgErrorCode reports whether err is a *pgconn.PgError with the given SQLSTATE code.

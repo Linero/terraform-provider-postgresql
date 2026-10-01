@@ -70,6 +70,8 @@ resource "postgresql_default_privileges" "app_tables" {
 - `postgresql_database_owner` - manages only a database's owner (`ALTER DATABASE ... OWNER TO`), independent of `postgresql_database`'s own `owner` attribute - useful when the connecting role can create databases but isn't a member of the intended owner role.
 - `postgresql_grant` - grants privileges on a database, schema, or all tables/sequences in a schema, to a role.
 - `postgresql_default_privileges` - grants privileges on objects an owner creates in a schema in the future.
+- `postgresql_grant_role` - grants membership in one role to another (`GRANT role TO role`), separately from `postgresql_role.roles` so it can be sequenced after both roles exist.
+- `postgresql_session_role` - makes a login role's sessions automatically run as another role (`ALTER ROLE ... [IN DATABASE ...] SET role = ...`), e.g. so a migration service acts as, and creates objects owned by, a database's owner.
 
 Creating a `postgresql_role` or `postgresql_database` that already exists outside of Terraform's state adopts it (via `ALTER`) instead of failing, so this provider can take over management without a manual `terraform import`. Grants and default privileges are idempotent in PostgreSQL itself, so they never hit this conflict in the first place.
 
