@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
@@ -38,6 +39,7 @@ type PostgresqlDatabaseResourceModel struct {
 	LcCtype         types.String `tfsdk:"lc_ctype"`
 	Template        types.String `tfsdk:"template"`
 	ConnectionLimit types.Int64  `tfsdk:"connection_limit"`
+	ReassignOwned   types.Bool   `tfsdk:"reassign_owned"`
 }
 
 func (r *PostgresqlDatabaseResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
@@ -112,6 +114,13 @@ func (r *PostgresqlDatabaseResource) Schema(ctx context.Context, req resource.Sc
 				Default:     int64default.StaticInt64(-1),
 				Description: "-1 means no limit.",
 			},
+			"reassign_owned": schema.BoolAttribute{
+				Optional: true,
+				Computed: true,
+				Default:  booldefault.StaticBool(false),
+				Description: reassignOwnedDescription + " Applies when owner changes on update, or when an " +
+					"already existing database is adopted on create (a freshly created database has nothing to reassign).",
+			},
 		},
 	}
 }
@@ -149,18 +158,6 @@ func (r *PostgresqlDatabaseResource) Create(ctx context.Context, req resource.Cr
 
 			adopted = true
 		}
-		if !plan.Owner.IsNull() && !plan.Owner.IsUnknown() {
-			ownerSQL := fmt.Sprintf("ALTER DATABASE %s OWNER TO %s", quoteIdent(name), quoteIdent(plan.Owner.ValueString()))
-			if _, err := conn.Exec(ctx, ownerSQL); err != nil {
-				return fmt.Errorf("could not set database owner: %w", err)
-			}
-		}
-		if adopted {
-			connLimitSQL := fmt.Sprintf("ALTER DATABASE %s CONNECTION LIMIT %d", quoteIdent(name), plan.ConnectionLimit.ValueInt64())
-			if _, err := conn.Exec(ctx, connLimitSQL); err != nil {
-				return fmt.Errorf("database %q already existed and its connection limit could not be updated to match configuration: %w", name, err)
-			}
-		}
 		return nil
 	})
 	if err != nil {
@@ -168,17 +165,18 @@ func (r *PostgresqlDatabaseResource) Create(ctx context.Context, req resource.Cr
 		return
 	}
 
-	attrs, found, err := r.readDatabaseAttributes(ctx, name)
-	if err != nil {
-		resp.Diagnostics.AddError("Error Creating PostgreSQL Database", fmt.Sprintf("Database %s was created but its attributes could not be read back: %s", name, err.Error()))
-		return
-	}
-	if !found {
-		resp.Diagnostics.AddError("Error Creating PostgreSQL Database", fmt.Sprintf("Database %s was reported as created but is missing on read-back", name))
-		return
-	}
-
+	// An adopted database must match the configuration before anything (e.g. its owner) is changed.
 	if adopted {
+		attrs, found, err := r.readDatabaseAttributes(ctx, name)
+		if err != nil {
+			resp.Diagnostics.AddError("Error Creating PostgreSQL Database", fmt.Sprintf("Database %s already exists but its attributes could not be read: %s", name, err.Error()))
+			return
+		}
+		if !found {
+			resp.Diagnostics.AddError("Error Creating PostgreSQL Database", fmt.Sprintf("Database %s was reported as existing but is missing on read-back", name))
+			return
+		}
+
 		var mismatches []string
 		if plan.Encoding.ValueString() != attrs.encoding {
 			mismatches = append(mismatches, fmt.Sprintf("encoding (configured %q, actual %q)", plan.Encoding.ValueString(), attrs.encoding))
@@ -200,6 +198,44 @@ func (r *PostgresqlDatabaseResource) Create(ctx context.Context, req resource.Cr
 			)
 			return
 		}
+	}
+
+	setOwner := !plan.Owner.IsNull() && !plan.Owner.IsUnknown()
+	reassign := setOwner && adopted && plan.ReassignOwned.ValueBool()
+	if setOwner || adopted {
+		var warning string
+		err = r.client.WithCatalogLockOnDatabase(ctx, r.client.ownerChangeDatabase(name, reassign), func(ctx context.Context, tx pgx.Tx) error {
+			if setOwner {
+				var err error
+				if warning, err = setDatabaseOwner(ctx, tx, name, plan.Owner.ValueString(), reassign); err != nil {
+					return err
+				}
+			}
+			if adopted {
+				connLimitSQL := fmt.Sprintf("ALTER DATABASE %s CONNECTION LIMIT %d", quoteIdent(name), plan.ConnectionLimit.ValueInt64())
+				if _, err := tx.Exec(ctx, connLimitSQL); err != nil {
+					return fmt.Errorf("database %q already existed and its connection limit could not be updated to match configuration: %w", name, err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			resp.Diagnostics.AddError("Error Creating PostgreSQL Database", fmt.Sprintf("Could not configure database %s: %s", name, err.Error()))
+			return
+		}
+		if warning != "" {
+			resp.Diagnostics.AddWarning("Database Objects Not Reassigned", warning)
+		}
+	}
+
+	attrs, found, err := r.readDatabaseAttributes(ctx, name)
+	if err != nil {
+		resp.Diagnostics.AddError("Error Creating PostgreSQL Database", fmt.Sprintf("Database %s was created but its attributes could not be read back: %s", name, err.Error()))
+		return
+	}
+	if !found {
+		resp.Diagnostics.AddError("Error Creating PostgreSQL Database", fmt.Sprintf("Database %s was reported as created but is missing on read-back", name))
+		return
 	}
 
 	attrs.applyTo(&plan)
@@ -228,6 +264,9 @@ func (r *PostgresqlDatabaseResource) Read(ctx context.Context, req resource.Read
 		return
 	}
 	attrs.applyTo(&state)
+	if state.ReassignOwned.IsNull() {
+		state.ReassignOwned = types.BoolValue(false)
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -243,11 +282,14 @@ func (r *PostgresqlDatabaseResource) Update(ctx context.Context, req resource.Up
 	name := plan.Name.ValueString()
 	tflog.Trace(ctx, "updating postgresql database", map[string]interface{}{"database": name})
 
-	err := r.client.WithCatalogLock(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		if !plan.Owner.IsNull() && !plan.Owner.IsUnknown() && plan.Owner.ValueString() != state.Owner.ValueString() {
-			sql := fmt.Sprintf("ALTER DATABASE %s OWNER TO %s", quoteIdent(name), quoteIdent(plan.Owner.ValueString()))
-			if _, err := tx.Exec(ctx, sql); err != nil {
-				return fmt.Errorf("could not set database owner: %w", err)
+	ownerChanged := !plan.Owner.IsNull() && !plan.Owner.IsUnknown() && plan.Owner.ValueString() != state.Owner.ValueString()
+	reassign := ownerChanged && plan.ReassignOwned.ValueBool()
+	var warning string
+	err := r.client.WithCatalogLockOnDatabase(ctx, r.client.ownerChangeDatabase(name, reassign), func(ctx context.Context, tx pgx.Tx) error {
+		if ownerChanged {
+			var err error
+			if warning, err = setDatabaseOwner(ctx, tx, name, plan.Owner.ValueString(), reassign); err != nil {
+				return err
 			}
 		}
 		if plan.ConnectionLimit.ValueInt64() != state.ConnectionLimit.ValueInt64() {
@@ -261,6 +303,9 @@ func (r *PostgresqlDatabaseResource) Update(ctx context.Context, req resource.Up
 	if err != nil {
 		resp.Diagnostics.AddError("Error Updating PostgreSQL Database", fmt.Sprintf("Could not update database %s: %s", name, err.Error()))
 		return
+	}
+	if warning != "" {
+		resp.Diagnostics.AddWarning("Database Objects Not Reassigned", warning)
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)

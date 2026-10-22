@@ -210,3 +210,12 @@ func (c *Client) QueryRowOnDatabase(ctx context.Context, database, sql string, a
 type errRow struct{ err error }
 
 func (r errRow) Scan(...any) error { return r.err }
+
+// ownerChangeDatabase picks the database an owner change of database runs in: REASSIGN OWNED only
+// reaches objects of the database it's executed in, a plain ALTER DATABASE works from the admin one.
+func (c *Client) ownerChangeDatabase(database string, reassign bool) string {
+	if reassign {
+		return database
+	}
+	return c.adminDB
+}

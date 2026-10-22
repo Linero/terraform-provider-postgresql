@@ -9,6 +9,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -26,8 +27,9 @@ type PostgresqlDatabaseOwnerResource struct {
 }
 
 type PostgresqlDatabaseOwnerResourceModel struct {
-	Database types.String `tfsdk:"database"`
-	Owner    types.String `tfsdk:"owner"`
+	Database      types.String `tfsdk:"database"`
+	Owner         types.String `tfsdk:"owner"`
+	ReassignOwned types.Bool   `tfsdk:"reassign_owned"`
 }
 
 func (r *PostgresqlDatabaseOwnerResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
@@ -59,6 +61,12 @@ func (r *PostgresqlDatabaseOwnerResource) Schema(ctx context.Context, req resour
 				Required:    true,
 				Description: "Role to assign as the database's owner.",
 			},
+			"reassign_owned": schema.BoolAttribute{
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+				Description: reassignOwnedDescription,
+			},
 		},
 	}
 }
@@ -70,10 +78,14 @@ func (r *PostgresqlDatabaseOwnerResource) Create(ctx context.Context, req resour
 		return
 	}
 
-	if err := r.applyOwner(ctx, plan.Database.ValueString(), plan.Owner.ValueString()); err != nil {
+	warning, err := r.applyOwner(ctx, plan.Database.ValueString(), plan.Owner.ValueString(), plan.ReassignOwned.ValueBool())
+	if err != nil {
 		resp.Diagnostics.AddError("Error Setting PostgreSQL Database Owner",
 			fmt.Sprintf("Could not set owner of database %s to %s: %s", plan.Database.ValueString(), plan.Owner.ValueString(), err.Error()))
 		return
+	}
+	if warning != "" {
+		resp.Diagnostics.AddWarning("Database Objects Not Reassigned", warning)
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -86,10 +98,14 @@ func (r *PostgresqlDatabaseOwnerResource) Update(ctx context.Context, req resour
 		return
 	}
 
-	if err := r.applyOwner(ctx, plan.Database.ValueString(), plan.Owner.ValueString()); err != nil {
+	warning, err := r.applyOwner(ctx, plan.Database.ValueString(), plan.Owner.ValueString(), plan.ReassignOwned.ValueBool())
+	if err != nil {
 		resp.Diagnostics.AddError("Error Setting PostgreSQL Database Owner",
 			fmt.Sprintf("Could not set owner of database %s to %s: %s", plan.Database.ValueString(), plan.Owner.ValueString(), err.Error()))
 		return
+	}
+	if warning != "" {
+		resp.Diagnostics.AddWarning("Database Objects Not Reassigned", warning)
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -118,6 +134,9 @@ func (r *PostgresqlDatabaseOwnerResource) Read(ctx context.Context, req resource
 	}
 
 	state.Owner = types.StringValue(owner)
+	if state.ReassignOwned.IsNull() {
+		state.ReassignOwned = types.BoolValue(false)
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -134,11 +153,13 @@ func (r *PostgresqlDatabaseOwnerResource) Delete(ctx context.Context, req resour
 	})
 }
 
-func (r *PostgresqlDatabaseOwnerResource) applyOwner(ctx context.Context, database, owner string) error {
-	tflog.Trace(ctx, "setting postgresql database owner", map[string]interface{}{"database": database, "owner": owner})
-	sql := fmt.Sprintf("ALTER DATABASE %s OWNER TO %s", quoteIdent(database), quoteIdent(owner))
-	return r.client.WithCatalogLock(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, sql)
+func (r *PostgresqlDatabaseOwnerResource) applyOwner(ctx context.Context, database, owner string, reassign bool) (string, error) {
+	tflog.Trace(ctx, "setting postgresql database owner", map[string]interface{}{"database": database, "owner": owner, "reassign_owned": reassign})
+	var warning string
+	err := r.client.WithCatalogLockOnDatabase(ctx, r.client.ownerChangeDatabase(database, reassign), func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		warning, err = setDatabaseOwner(ctx, tx, database, owner, reassign)
 		return err
 	})
+	return warning, err
 }

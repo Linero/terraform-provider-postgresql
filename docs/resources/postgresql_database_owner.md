@@ -38,3 +38,7 @@ resource "postgresql_database_owner" "app" {
 
 - `database` (String) Name of the database whose owner is managed. Changing this forces a new resource.
 - `owner` (String) Role to assign as the database's owner.
+
+### Optional
+
+- `reassign_owned` (Boolean) Defaults to `false`. When the owner changes, also run `REASSIGN OWNED BY <previous owner> TO <new owner>` inside the database, so every object the previous owner had there (schemas, tables, sequences, functions, types, ...) moves to the new owner. `REASSIGN OWNED` also transfers shared objects (other databases, tablespaces); those are handed back to the previous owner in the same transaction, so only this database is affected. Skipped (with a warning) when the previous owner is a superuser. Requires the connecting role to have the privileges of both the previous and the new owner.

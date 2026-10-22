@@ -31,6 +31,7 @@ resource "postgresql_database" "app" {
 - `lc_ctype` (String) Defaults to `"en_US.UTF-8"`. Changing this forces a new resource.
 - `template` (String) Defaults to `"template0"`. Changing this forces a new resource.
 - `connection_limit` (Number) `-1` (default) means no limit.
+- `reassign_owned` (Boolean) Defaults to `false`. When the owner changes, also run `REASSIGN OWNED BY <previous owner> TO <new owner>` inside the database, so every object the previous owner had there (schemas, tables, sequences, functions, types, ...) moves to the new owner. `REASSIGN OWNED` also transfers shared objects (other databases, tablespaces); those are handed back to the previous owner in the same transaction, so only this database is affected. Skipped (with a warning) when the previous owner is a superuser. Requires the connecting role to have the privileges of both the previous and the new owner. Applies when `owner` changes on update, or when an already existing database is adopted on create (a freshly created database has nothing to reassign).
 
 ## Import
 
